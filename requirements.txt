@@ -1,0 +1,10 @@
+# project: GrantedByMe Server
+# author: GrantedByMe <info@grantedby.me>
+# usage: sudo -H python3 -m pip install -r requirements.txt --upgrade
+#
+# example requirements
+flask
+flask-login
+requests
+redis
+grantedbyme
