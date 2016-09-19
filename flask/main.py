@@ -15,8 +15,7 @@ import json
 
 import redis
 from flask import Flask, request, redirect, url_for, render_template, make_response, jsonify, flash
-from flask.ext.login import LoginManager, login_required, login_user, logout_user, current_user
-from flask.ext.login import UserMixin
+from flask_login import LoginManager, login_required, login_user, logout_user, current_user, UserMixin
 
 base_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -31,14 +30,23 @@ if config['app']['BRANCH'] == 'local':
 else:
     data_dir = config['app']['SECRET_DIR']
 
-from grantedbyme import GrantedByMe
-from grantedbyme import GBMCrypto
+from grantedbyme import GrantedByMe, GBMCrypto, ChallengeType
+import logging
+from logging.handlers import RotatingFileHandler
+import os
 
 # create flask application
 app = Flask(__name__, static_folder='static')
 app.config.from_object(config['flask'])
 if config['app']['BRANCH'] == 'local':
     app.config.from_object(config['flask-local'])
+
+# configure logging
+base_dir = os.path.dirname(os.path.realpath(__file__))
+log_file = os.path.join(base_dir, 'logs/app.log')
+handler = RotatingFileHandler(log_file, maxBytes=10000, backupCount=1)
+handler.setLevel(logging.INFO)
+app.logger.addHandler(handler)
 
 # setup flask login extension
 login_manager = LoginManager()
@@ -59,21 +67,21 @@ if not redis.exists('user_counter'):
     redis.set('user_counter', 0)
 
 
-def _user_add(email, grantor, first_name, last_name):
+def _user_add(email, authenticator_secret, first_name, last_name):
     if redis.exists('user_id_by_email_' + email):
         _flash_log('User already exists: ' + email)
         return None
     redis.incr('user_counter')
     user_id = redis.get('user_counter')
     app.logger.info('create_user: %s with user id: %s', email, user_id)
-    user_data = {'grantor': grantor,
+    user_data = {'authenticator_secret': authenticator_secret,
                  'email': email,
                  'first_name': first_name,
                  'last_name': last_name,
                  'user_id': user_id}
-    if grantor:
-        redis.set('user_id_by_grantor_' + grantor, user_id)
-        redis.set('grantor_by_hash_' + GBMCrypto.sha512(grantor), grantor)
+    if authenticator_secret:
+        redis.set('user_id_by_authenticator_secret_' + authenticator_secret, user_id)
+        redis.set('authenticator_secret_by_hash_' + GrantedByMe.hash_authenticator_secret(authenticator_secret), authenticator_secret)
     if email:
         redis.set('user_id_by_email_' + email, user_id)
     redis.set('user_by_id_' + user_id, json.dumps(user_data))
@@ -81,23 +89,23 @@ def _user_add(email, grantor, first_name, last_name):
     return user_id
 
 
-def _user_update(user_id, grantor):
+def _user_update(user_id, authenticator_secret):
     if redis.exists('user_by_id_' + user_id):
         user_data = json.loads(redis.get('user_by_id_' + user_id))
-        user_data['grantor'] = grantor
-        if grantor:
-            redis.set('user_id_by_grantor_' + grantor, user_id)
-            redis.set('grantor_by_hash_' + GBMCrypto.sha512(grantor), grantor)
+        user_data['authenticator_secret'] = authenticator_secret
+        if authenticator_secret:
+            redis.set('user_id_by_authenticator_secret_' + authenticator_secret, user_id)
+            redis.set('authenticator_secret_by_hash_' + GrantedByMe.hash_authenticator_secret(authenticator_secret), authenticator_secret)
         _flash_log('User updated: ' + str(user_id))
         return redis.set('user_by_id_' + user_id, json.dumps(user_data))
     else:
-        _flash_log('User not found: ' + grantor)
+        _flash_log('User not found: ' + authenticator_secret)
     return False
 
 
-def _user_get(grantor):
-    if redis.exists('user_id_by_grantor_' + grantor):
-        user_id = redis.get('user_id_by_grantor_' + grantor)
+def _user_get(authenticator_secret):
+    if redis.exists('user_id_by_authenticator_secret_' + authenticator_secret):
+        user_id = redis.get('user_id_by_authenticator_secret_' + authenticator_secret)
         user_data = redis.get('user_by_id_' + user_id)
         return json.loads(user_data)
     return None
@@ -220,15 +228,15 @@ def ajax():
         if request.form['operation'] == 'getSessionState':
             response_data = _get_session_state()
         elif request.form['operation'] == 'getSessionToken':
-            response_data = gbm.get_session_token(client_ip=client_ip, client_ua=client_ua)
+            response_data = gbm.get_challenge(challenge_type=ChallengeType.session.value, client_ip=client_ip, client_ua=client_ua)
         elif request.form['operation'] == 'getAccountState':
             response_data = _get_account_state()
         elif request.form['operation'] == 'getAccountToken':
-            response_data = gbm.get_account_token(client_ip=client_ip, client_ua=client_ua)
+            response_data = gbm.get_challenge(challenge_type=ChallengeType.account.value, client_ip=client_ip, client_ua=client_ua)
         elif request.form['operation'] == 'getRegisterState':
             response_data = _get_register_state()
         elif request.form['operation'] == 'getRegisterToken':
-            response_data = gbm.get_register_token(client_ip=client_ip, client_ua=client_ua)
+            response_data = gbm.get_challenge(challenge_type=ChallengeType.activate.value, client_ip=client_ip, client_ua=client_ua)
         app.logger.info('request: %s and response: %s', request.form, response_data)
     if not response_data:
         response_data = {'success': False}
@@ -237,26 +245,26 @@ def ajax():
 
 def _get_session_state():
     """TBD"""
-    response_data = gbm.get_token_state(request.form['token'])
+    response_data = gbm.get_challenge_state(request.form['challenge'])
     if response_data['success'] and response_data['status'] == 3:
-        if redis.exists('user_id_by_grantor_' + response_data['grantor']):
-            user_id = redis.get('user_id_by_grantor_' + response_data['grantor'])
+        if redis.exists('user_id_by_authenticator_secret_' + response_data['authenticator_secret']):
+            user_id = redis.get('user_id_by_authenticator_secret_' + response_data['authenticator_secret'])
             _user_login(user_id)
         else:
             _flash_log('Authentication error')
-        del response_data['grantor']
+        del response_data['authenticator_secret']
     return response_data
 
 
 def _get_account_state():
     """TBD"""
-    response_data = gbm.get_token_state(request.form['token'])
+    response_data = gbm.get_challenge_state(request.form['challenge'])
     if response_data['success'] and response_data['status'] == 3:
-        grantor = GBMCrypto.random_string(128)
-        result = gbm.link_account(request.form['token'], grantor)
+        authenticator_secret = GrantedByMe.generate_authenticator_secret()
+        result = gbm.link_account(request.form['challenge'], authenticator_secret)
         if result['success']:
             user_id = current_user.get_id()
-            _user_update(user_id, grantor)
+            _user_update(user_id, authenticator_secret)
         else:
             _flash_log('Error migrating your account to GrantedByMe')
     return response_data
@@ -264,15 +272,15 @@ def _get_account_state():
 
 def _get_register_state():
     """TBD"""
-    response_data = gbm.get_token_state(request.form['token'])
+    response_data = gbm.get_challenge_state(request.form['challenge'])
     if response_data['success'] and response_data['status'] == 3:
-        grantor = GBMCrypto.random_string(128)
-        result = gbm.link_account(request.form['token'], grantor)
+        authenticator_secret = GrantedByMe.generate_authenticator_secret()
+        result = gbm.link_account(request.form['challenge'], authenticator_secret)
         if result['success']:
             email = response_data['data']['email']
             first_name = response_data['data']['first_name']
             last_name = response_data['data']['last_name']
-            user_id = _user_add(email, grantor, first_name, last_name)
+            user_id = _user_add(email, authenticator_secret, first_name, last_name)
             del response_data['data']
         else:
             _flash_log('Error creating user account')
@@ -283,32 +291,29 @@ def _get_register_state():
 def callback():
     """TBD"""
     plain_response = {'success': False}
-    if 'signature' in request.form and 'payload' in request.form and 'message' in request.form:
+    if 'signature' in request.form and 'payload' in request.form:
         cipher_request = {
             'signature': request.form['signature'],
-            'payload': request.form['payload'],
-            'message': request.form['message']
+            'payload': request.form['payload']
         }
+        if 'message' in request.form:
+            cipher_request['message'] = request.form['message']
         plain_request = GBMCrypto.decrypt_compound(cipher_request, gbm.server_key, gbm.private_key)
         app.logger.info('callback: %s', plain_request)
         if 'operation' in plain_request:
             if plain_request['operation'] == 'ping':
                 plain_response = {'success': True}
-            elif plain_request['operation'] == 'deactivate_service':
-                # TODO: Implement
-                plain_response = {'success': True}
-            elif plain_request['operation'] == 'rekey_service':
-                # TODO: Implement
-                plain_response = {'success': True}
-            elif plain_request['operation'] == 'deactivate_account':
-                grantor = redis.get('grantor_by_hash_' + plain_request['token'])
-                user_id = redis.get('user_id_by_grantor_' + grantor)
+            elif plain_request['operation'] == 'unlink_account':
+                authenticator_secret = redis.get('authenticator_secret_by_hash_' + plain_request['token'])
+                user_id = redis.get('user_id_by_authenticator_secret_' + authenticator_secret)
                 if _user_update(user_id, None):
                     plain_response = {'success': True}
             elif plain_request['operation'] == 'rekey_account':
-                if redis.exists('grantor_by_hash_' + plain_request['token']):
-                    grantor = redis.get('grantor_by_hash_' + plain_request['token'])
-                    plain_response = {'success': True, 'grantor': grantor}
+                if redis.exists('authenticator_secret_by_hash_' + plain_request['token']):
+                    authenticator_secret = redis.get('authenticator_secret_by_hash_' + plain_request['token'])
+                    plain_response = {'success': True, 'authenticator_secret': authenticator_secret}
+            else:
+                app.logger.info('callback operation not handled: %s', plain_request['operation'])
     cipher_response = GBMCrypto.encrypt_compound(plain_response, gbm.server_key, gbm.private_key)
     return make_response(jsonify(cipher_response))
 
