@@ -309,9 +309,12 @@ def callback():
                 if _user_update(user_id, None):
                     plain_response = {'success': True}
             elif plain_request['operation'] == 'rekey_account':
-                if redis.exists('authenticator_secret_by_hash_' + plain_request['token']):
-                    authenticator_secret = redis.get('authenticator_secret_by_hash_' + plain_request['token'])
+                if redis.exists('authenticator_secret_by_hash_' + plain_request['authenticator_secret_hash_']):
+                    authenticator_secret = redis.get('authenticator_secret_by_hash_' + plain_request['authenticator_secret_hash_'])
                     plain_response = {'success': True, 'authenticator_secret': authenticator_secret}
+            elif plain_request['operation'] == 'revoke_challenge':
+                # TODO: implement
+                plain_response = {'success': True}
             else:
                 app.logger.info('callback operation not handled: %s', plain_request['operation'])
     cipher_response = GBMCrypto.encrypt_compound(plain_response, gbm.server_key, gbm.private_key)
