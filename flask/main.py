@@ -225,18 +225,15 @@ def ajax():
             client_ip = request.remote_addr
         if 'User-Agent' in request.headers:
             client_ua = request.headers['User-Agent']
-        if request.form['operation'] == 'getSessionState':
-            response_data = _get_session_state()
-        elif request.form['operation'] == 'getSessionToken':
-            response_data = gbm.get_challenge(challenge_type=ChallengeType.authenticate.value, client_ip=client_ip, client_ua=client_ua)
-        elif request.form['operation'] == 'getAccountState':
-            response_data = _get_account_state()
-        elif request.form['operation'] == 'getAccountToken':
-            response_data = gbm.get_challenge(challenge_type=ChallengeType.authorize.value, client_ip=client_ip, client_ua=client_ua)
-        elif request.form['operation'] == 'getRegisterState':
-            response_data = _get_register_state()
-        elif request.form['operation'] == 'getRegisterToken':
-            response_data = gbm.get_challenge(challenge_type=ChallengeType.profile.value, client_ip=client_ip, client_ua=client_ua)
+        if request.form['operation'] == 'getChallenge':
+            response_data = gbm.get_challenge(challenge_type=int(request.form['challenge_type']), client_ip=client_ip, client_ua=client_ua)
+        elif request.form['operation'] == 'getChallengeState':
+            if int(request.form['challenge_type']) == ChallengeType.authorize:
+                response_data = _get_account_state()
+            elif int(request.form['challenge_type']) == ChallengeType.authenticate:
+                response_data = _get_session_state()
+            elif int(request.form['challenge_type']) == ChallengeType.profile:
+                response_data = _get_register_state()
         app.logger.info('request: %s and response: %s', request.form, response_data)
     if not response_data:
         response_data = {'success': False}
